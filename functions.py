@@ -1,6 +1,7 @@
 import numpy as np
 from constants import params
 
+
 def F_collapsed(x):
     if x < 0:
         return -1

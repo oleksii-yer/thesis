@@ -20,12 +20,12 @@ def plot_basic(t_values, x_values, y_values):
     plt.show()
 
 
-def plot_anim(t_values, x_values, y_values, slide, frame_step, include_slide=False, vec_field=False, normed=True):
+def plot_anim(t_values, x_values, y_values, slide, title, frame_step, include_slide=False, vec_field=False, normed=True):
     # Set up the figure and axis
     fig, ax = plt.subplots()
     ax.set_xlabel('x')
     ax.set_ylabel('y')
-    ax.set_title('Euler Method with Sliding Zone')
+    ax.set_title(title)
 
     # Plot the x and y axes
     ax.axhline(0, color='black', linewidth=0.8)  # x-axis
