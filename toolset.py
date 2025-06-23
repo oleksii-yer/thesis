@@ -3,58 +3,65 @@ import matplotlib.pyplot as plt
 import functions as fn
 import analytical as an
 import num_methods as nm
-import ploting as pl
 from joblib import Parallel, delayed, parallel_backend
-from numba import jit, cuda, float32
-import cupy as cp
-from functions import dx_dt, dy_dt
+from collections import defaultdict
+
+
+def t_end_map(mu, f_type):
+    t_end = 0
+    if f_type == 'meand':
+        t_end = np.ceil(mu) * 1000
+    elif f_type == 'sin':
+        t_end = np.ceil(mu) * 2000
+
+    return t_end
 
 
 def find_first_zero_index(x_values):
     for i in range(1, len(x_values)+1):
         if x_values[-i] == 0:
             return i
-    return len(x_values) - 1  # Default case
+    return len(x_values) - 1
 
 
 
-def compute_y_intercept(t0, y0, mu, a, b, tau, F, f, phi, h, t_end):
+def compute_y_intercept(t0, y0, mu, a, b, tau, F_type, f_type, h, t_end):
     x0 = 0
-
-    _, x_values, y_values, _ = nm.runge_kutta_slide(fn.dx_dt, fn.dy_dt, t0, x0, y0, h, t_end, F, f, a, b, phi, mu, tau, t0_shift=True, period=2*tau)
+    _, x_values, y_values = nm.runge_kutta_slide(fn.dx_dt, fn.dy_dt, t0, x0, y0, h, t_end,
+                                                    F_type, f_type, a, b, mu, tau)
     y_index = find_first_zero_index(x_values)
-    # y_index = np.argmax(x_values == 0)
 
-    if y_values[-y_index-1] >= 0:
-        y_intercept = y_values[-y_index-1]
+    if y_values[-y_index] >= 0:
+        y_intercept = y_values[-y_index]
     else:
-        y_index_new = np.argmax(x_values[y_index + 1:] == 0)
-        y_intercept = y_values[-y_index_new-1]
+        y_index_new = find_first_zero_index(x_values[:-y_index])
+        y_intercept = y_values[:-y_index][-y_index_new]
 
     return y_intercept
 
 
 
-def create_diagram_point(t0_list, y0_list, mu_list, a, b, tau, F, f, phi, h, t_end):
+def create_diagram_point(t0_list, y0_list, mu_list, a, b, tau, F, f, h, t_end):
     num_plots = len(t0_list)
     ncols = 2 if num_plots > 1 else 1
-    nrows = (num_plots + 1) // 2  # Ensure enough rows
+    nrows = (num_plots + 1) // 2
 
     fig, ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(10, 6))
+    fig.suptitle(f"Hysteresis diagram with F - {F}, f - {f}", fontsize=16)
     if num_plots == 1:
-        ax = np.array([ax])  # Ensure it's iterable
+        ax = np.array([ax])
     else:
         ax = np.ravel(ax)
 
     for i in range(len(t0_list)):
         with parallel_backend("loky", inner_max_num_threads=1):  # More efficient threading
-            results = Parallel(n_jobs=-1, batch_size=10)( 
-                delayed(compute_y_intercept)(t0_list[i], y0, mu, a, b, tau, F, f, phi, h, t_end) 
+            results = Parallel(n_jobs=-1, batch_size=20)( 
+                delayed(compute_y_intercept)(t0_list[i], y0, mu, a, b, tau, F, f, h, t_end) 
                 for mu in mu_list 
                 for y0 in y0_list
             )
 
-        mu_array = np.repeat(mu_list, len(y0_list))  # Expand mu values
+        mu_array = np.repeat(mu_list, len(y0_list))
         y_points = np.array(results)
 
         sc = ax[i].scatter(mu_array, y_points, c=np.tile(y0_list, len(mu_list)), cmap='viridis', alpha=0.5)
@@ -67,193 +74,241 @@ def create_diagram_point(t0_list, y0_list, mu_list, a, b, tau, F, f, phi, h, t_e
     plt.show()
 
 
-def preturbation_eigen(e1, e2, t0, h, t_end, F_type, f_type, a, b, phi, mu, tau):
-    y_fixed = -an.compute_y0(t0, mu, b, tau)
+def create_diagram_hyst_theoretical(ax, mu_list_max, a, b, tau, f_type, alpha=0.8):
+    mu_list = np.arange(0, mu_list_max+0.01, 0.01)
+    mu_list = np.append(mu_list, [an.compute_mu0(a, b, tau, f_type)])
+    mu_list = np.sort(mu_list)
+    m0 = None
+    m1 = None
+    if f_type == 'meand':
+        m0 = an.compute_mu0(a, b, tau, f_type)
+        m1 = 1
+    if f_type == 'sin':
+        m0 = an.compute_mu0(a, b, tau, f_type)
+        m1 = an.compute_mu1(a, b, tau)
+    if (tau/2 - a/b) > 0:
+        solutions_t0 = {float(mu) : an.compute_roots_t0(mu, a, b, tau, f_type) for mu in mu_list}
+        solutions_y0_smaller = {float(mu) : np.min([an.compute_y0(t, mu, b, tau, f_type) for t in solutions_t0[mu]]) for mu in mu_list[(mu_list >= m0) & (mu_list < m1)]}
+        solutions_y0_greater = {float(mu) : np.max([an.compute_y0(t, mu, b, tau, f_type) for t in solutions_t0[mu]]) for mu in mu_list[(mu_list > m0)]}
+        mu_plot = list(solutions_y0_smaller.keys())[::-1]
+        mu_plot += list(solutions_y0_greater.keys())
+        y_plot = list(solutions_y0_smaller.values())[::-1] + list(solutions_y0_greater.values())
+    else:
+        solutions_t0 = {float(mu) : an.compute_roots_t0(mu, a, b, tau, f_type)[0] for mu in mu_list[mu_list > m1]}
+        solutions_y0 = [an.compute_y0(t, mu, b, tau, f_type) for t, mu in zip(solutions_t0.values(), solutions_t0.keys())]
+        mu_plot = mu_list[mu_list > m1]
+        y_plot = solutions_y0
+
+    ax.plot(mu_plot, y_plot, c='blue', alpha=alpha, linewidth=2.5, label='Theoretical')
+    ax.legend()
+        
+    ax.set_xlabel(r'Amplitude $\mu$')
+    ax.set_ylabel(r'Fixed point $y_{fixed}$')
+
+
+def create_diagram_hyst_numerical(ax, t0, y0_list, mu_list, a, b, tau, F_type, f_type, h, t_end, coloring=False):
+    mu_unstable_left = None
+    ind_unstable_left = 0
+    y_max_left = 0
+
+    mu_unstable_right = None
+    ind_unstable_right = 0
+    y_max_right = 0
+    if (t0 % (2*tau)) < tau:
+        with parallel_backend("loky", inner_max_num_threads=1):  # More efficient threading
+            results_flat = Parallel(n_jobs=-1, batch_size=10)( 
+                delayed(compute_y_intercept)(t0, y0, mu, a, b, tau, F_type, f_type, h, t_end) 
+                for mu in mu_list 
+                for y0 in y0_list
+            )
+    else:
+        with parallel_backend("loky", inner_max_num_threads=1):
+            results_flat = Parallel(n_jobs=-1, batch_size=10)( 
+                delayed(compute_y_intercept)(t0, y0, mu, a, b, tau, F_type, f_type, h, t_end) 
+                for mu in mu_list 
+                for y0 in -y0_list
+            )
+
+    # Group results by mu after computing
+    grouped_results = defaultdict(list)
+    idx = 0
+    for mu in mu_list:
+        for _ in y0_list:
+            grouped_results[mu].append(results_flat[idx])
+            idx += 1
+
+    for j, mu in enumerate(mu_list):
+        diff = np.diff(grouped_results[mu])
+        upper_bound = None
+        if F_type == 'closed':
+            upper_bound = an.compute_slide_topedge_max(a, mu)
+        elif F_type == 'open':
+            upper_bound = 2*b
+        elif F_type == 'tanh':
+            upper_bound = 2*b
+        if (np.any(diff > upper_bound) and (mu_unstable_left == None)):
+            mu_unstable_left = mu
+            ind_unstable_left = j
+            y_max_left = np.max(grouped_results[mu_unstable_left])
+        elif (np.all(np.array(grouped_results[mu], dtype=float) > upper_bound) and (mu_unstable_right == None)):
+            mu_unstable_right = mu_list[j]
+            ind_unstable_right = j
+            y_max_right = np.min(grouped_results[mu_unstable_right])
+            break
+
+    nbh = 0.1
+    unstable_mu_range = mu_list[ind_unstable_left + 1:ind_unstable_right]
+    if (t0 % (2*tau)) < tau:
+        unstable_y0_grouped = {mu : np.arange(0, -np.max(grouped_results[mu]), -nbh) for mu in unstable_mu_range}
+    else:
+        unstable_y0_grouped = {mu : np.arange(0, np.max(grouped_results[mu]), nbh) for mu in unstable_mu_range}
+    unstable_y_list = []
+
+    with parallel_backend("loky", inner_max_num_threads=1):
+        unstable_results_flat = Parallel(n_jobs=-1, batch_size=10)( 
+            delayed(compute_y_intercept)(np.min(an.compute_roots_t0(mu, a, b, tau, f_type, tcr_filter=False)), y0, mu, a, b, tau, F_type, f_type, h, t_end) 
+            for mu in unstable_mu_range
+            for y0 in unstable_y0_grouped[mu] 
+        )
+
+    grouped_unstable_results = defaultdict(list)
+    idx = 0
+    for mu in unstable_mu_range:
+        for _ in unstable_y0_grouped[mu]:
+            grouped_unstable_results[mu].append(unstable_results_flat[idx])
+            idx += 1
+
+    for mu in unstable_mu_range:
+        unstable_diff = np.diff(grouped_unstable_results[mu])
+        if np.any(unstable_diff > np.abs((unstable_y0_grouped[mu][-1]/2))):
+            max_diff_idx = np.argmax(unstable_diff > (np.max(grouped_unstable_results[mu])) / 2)
+            if (t0 % (2*tau)) < tau:
+                unstable_y_list.append(-(unstable_y0_grouped[mu][max_diff_idx + 1] + unstable_y0_grouped[mu][max_diff_idx]) / 2)
+            else:
+                unstable_y_list.append((unstable_y0_grouped[mu][max_diff_idx + 1] + unstable_y0_grouped[mu][max_diff_idx]) / 2)
+
+
+    mu_array = np.repeat(mu_list, len(y0_list))
+    y_points = np.array(results_flat)
+    print(unstable_mu_range, unstable_y_list)
+    if coloring:
+        sc = ax.scatter(mu_array, y_points, c=np.tile(y0_list, len(mu_list)), cmap='viridis', alpha=0.5, label='Stable numerical')
+    else:
+        sc = ax.scatter(mu_array, y_points, c='k', alpha=0.5, label='Stable numerical')
+    if unstable_mu_range.size != 0:
+        ax.scatter(unstable_mu_range, unstable_y_list, color='red', marker='^', label='Unstable numerical')
+        ax.vlines(mu_unstable_left, 0, y_max_left, color='red')
+        ax.vlines(mu_unstable_right, 0, y_max_right, color='red')
+        arrow_length = 0.1 * (y_max_left/2)
+        ax.annotate(
+            '', 
+            xy=(mu_unstable_left, y_max_left/2 + arrow_length / 2), 
+            xytext=(mu_unstable_left, y_max_left/2 - arrow_length / 2),
+            arrowprops=dict(
+                arrowstyle='<-', 
+                color='red',
+                linewidth=1.5,
+                mutation_scale=20
+            )
+        )
+        arrow_length = 0.1 * (y_max_right/2)
+        ax.annotate(
+            '', 
+            xy=(mu_unstable_right, y_max_right/2 + arrow_length / 2), 
+            xytext=(mu_unstable_right, y_max_right/2 - arrow_length / 2),
+            arrowprops=dict(
+                arrowstyle='->', 
+                color='red',
+                linewidth=1.5,
+                mutation_scale=20
+            )
+        )
+    ax.plot(mu_list, np.zeros(len(mu_list)), 'k--')
+    ax.set_title(f"t0 = {t0}")
+    ax.set_xlabel(r'Amplitude $\mu$')
+    ax.set_ylabel(r'Fixed point $y_{fixed}$')
+    ax.legend()
+
+    return ax, sc
+
+
+def create_diagram_hyst(diag_type, t0_list=None, y0_list=None, mu_list=None, a=None, b=None, tau=None, F_type=None, f_type=None, h=None, t_end=None, coloring=False):
+    if (t0_list != None) and ((diag_type == 'numerical') or (diag_type == 'comparison')):
+        num_plots = len(t0_list)
+        ncols = 2 if num_plots > 1 else 1
+        nrows = (num_plots + 1) // 2
+
+        fig, axs = plt.subplots(nrows=nrows, ncols=ncols, figsize=(10, 6))
+        fig.suptitle(f"Hysteresis {diag_type} diagram with F - {F_type}, f - {f_type}", fontsize=16)
+        if num_plots == 1:
+            axs = np.array([axs])
+        else:
+            axs = np.ravel(axs)
+    else:
+        fig, axs = plt.subplots(nrows=1, ncols=1, figsize=(10, 6))
+        fig.suptitle(f"Hysteresis {diag_type} diagram with F - {F_type}, f - {f_type}", fontsize=16)
+
+    sc = None
+    if diag_type == 'numerical':
+        for i in range(len(t0_list)):
+            axs[i].grid()
+            _, sc = create_diagram_hyst_numerical(axs[i], t0_list[i], y0_list, mu_list, a, b, tau, F_type, f_type, h, t_end)
+    
+    elif diag_type == 'theoretical':
+        axs.grid()
+        create_diagram_hyst_theoretical(axs, mu_list[-1], a, b, tau, f_type)
+    
+    elif diag_type == 'comparison':
+        for i in range(len(t0_list)):
+            axs[i].grid()
+            _, sc = create_diagram_hyst_numerical(axs[i], t0_list[i], y0_list, mu_list, a, b, tau, F_type, f_type, h, t_end)
+            create_diagram_hyst_theoretical(axs[i], mu_list[-1], a, b, tau, f_type, alpha=0.3)
+            
+    if ((diag_type == 'numerical') or (diag_type == 'comparison')):
+        if coloring:
+            cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+            fig.colorbar(sc, cax=cbar_ax, label=r'$y_0$ values')
+            
+    plt.show()
+
+
+def ic_fixed(mu, a, b, tau):
+    roots = an.compute_roots_t0(mu, a, b, tau)
+    y_intercepts = [an.compute_y0(t, mu, b, tau) for t in roots]
+
+    return list(zip(roots, y_intercepts))
+
+
+def preturbation_eigen(e1, e2, h, F_type, f_type, a, b, mu, tau):
+    values = ic_fixed(mu, a, b, tau)[0]
+    print(values)
+    t0 = -float(values[0])
+    y_fixed = float(values[1])
+
     x0 = 0
     y0 = y_fixed + e1
 
-    x_mapped1, y_mapped1 = nm.runge_kutta_iter(fn.dx_dt, fn.dy_dt, t0, x0, y0, h, t_end, F_type, f_type, a, b, phi, mu, tau, t0_shift=True, period=2*tau)
+    x_mapped1, y_mapped1 = nm.runge_kutta_iter(fn.dx_dt, fn.dy_dt, t0, x0, y0, h, F_type, f_type, a, b, mu, tau)
     x0 = e2
     y0 = y_fixed
-    x_mapped2, y_mapped2 = nm.runge_kutta_iter(fn.dx_dt, fn.dy_dt, t0, x0, y0, h, t_end, F_type, f_type, a, b, phi, mu, tau, t0_shift=True, period=2*tau)
+    x_mapped2, y_mapped2 = nm.runge_kutta_iter(fn.dx_dt, fn.dy_dt, t0, x0, y0, h, F_type, f_type, a, b, mu, tau)
 
-    a = np.array([[0, y_fixed + e1, 0, 0], [0, 0, 0, y_fixed + e1], [e2, y_fixed, 0, 0], [0, 0, e2, y_fixed]])
-    b = np.array([0, e1, e2, 0])
-    print(b)
+    print(x_mapped1, y_mapped1)
+    print(x_mapped2, y_mapped2)
+    a = np.array([[0, e1, 0, 0], 
+                  [0, 0, 0, e1], 
+                  [e2, 0, 0, 0], 
+                  [0, 0, e2, 0]])
+    b = np.array([x_mapped1,
+                  y_mapped1 - y_fixed,
+                  x_mapped2,
+                  y_mapped2 - y_fixed
+])
+
+
     v = np.linalg.solve(a, b)
 
     v = v.reshape(2, 2)
-    eigenval = np.linalg.eig(v)
+    eigenval, eigenvec = np.linalg.eig(v)
 
-    return eigenval
-
-
-# ----------------------------------------------
-
-# @cuda.jit
-# def find_first_zero_index_kernel(x_values, y_values, results):
-#     i = cuda.grid(1)
-#     if i >= x_values.shape[0]:
-#         return
-    
-#     for j in range(x_values.shape[1]):
-#         if x_values[i, j] == 0.0:  # Explicitly compare with 0.0
-#             results[i] = y_values[i, j]
-#             return
-    
-#     results[i] = y_values[i, -1]  # Default case
-
-
-# def compute_y_intercept_gpu(t0_list, y0_list, mu_list, a, b, tau, phi, h, t_end):
-#     num_points = len(mu_list) * len(y0_list)
-    
-#     # Transfer input arrays to GPU
-#     t0_gpu = cuda.to_device(np.array(t0_list, dtype=np.float64))
-#     x0_gpu = cuda.to_device(np.zeros(num_points, dtype=np.float64))
-#     y0_gpu = cuda.to_device(np.array(y0_list, dtype=np.float64))
-    
-#     # Ensure mu_list is correctly passed
-#     mu_gpu = cuda.to_device(np.array(mu_list, dtype=np.float64))
-    
-#     # Allocate memory for results
-#     x_values = cuda.device_array((num_points, int(t_end / h) + 1), dtype=np.float64)
-#     y_values = cuda.device_array((num_points, int(t_end / h) + 1), dtype=np.float64)
-#     results_gpu = cuda.device_array(num_points, dtype=np.float64)
-    
-#     # CUDA kernel launch parameters
-#     threads_per_block = 256
-#     blocks_per_grid = (num_points + threads_per_block - 1) // threads_per_block
-
-#     # Call the Runge-Kutta CUDA kernel (pass mu_list correctly)
-#     print(type(t0_gpu))
-#     print("t0 shape:", t0_gpu.copy_to_host().shape)
-#     nm.runge_kutta_kernel[blocks_per_grid, threads_per_block](
-#         t0_gpu, x0_gpu, y0_gpu, h, t_end, a, b, phi, mu_gpu, tau, x_values, y_values
-#     )
-    
-#     # Call the kernel to find first zero index
-#     find_first_zero_index_kernel[blocks_per_grid, threads_per_block](x_values, y_values, results_gpu)
-    
-#     return results_gpu.copy_to_host()
-
-
-# def create_diagram_point_gpu(t0_list, y0_list, mu_list, a, b, tau, F, f, phi, h, t_end):
-    
-#     num_plots = len(t0_list)
-#     fig, ax = plt.subplots(nrows=(num_plots + 1) // 2, ncols=2, figsize=(10, 6))
-#     ax = np.ravel(ax) if num_plots > 1 else [ax]
-    
-#     for i, t0 in enumerate(t0_list):
-#         y_points = compute_y_intercept_gpu(t0, y0_list, mu_list, a, b, tau, phi, h, t_end)
-        
-#         sc = ax[i].scatter(mu_list, y_points, cmap='viridis', alpha=0.5)
-#         fig.colorbar(sc, ax=ax[i], label=r'$y_0$ values')
-#         ax[i].plot(mu_list, np.zeros(len(mu_list)), 'k--')
-#         ax[i].set_title(f"t0 = {t0}")
-#         ax[i].grid()
-    
-#     plt.tight_layout()
-#     plt.show()
-
-
-
-# # Define your kernel to run on the GPU
-# @cuda.jit
-# def compute_y_intercept_kernel(t0, mu_list, y0_list, results, a, b, tau, f, F, phi, h, t_end):
-#     print(12)
-#     idx = cuda.grid(1)  # Each thread processes a (mu, y0) pair
-#     if idx < len(mu_list) * len(y0_list):
-#         # Retrieve the (mu, y0) pair
-#         mu_idx = idx // len(y0_list)
-#         y0_idx = idx % len(y0_list)
-#         mu = mu_list[mu_idx]
-#         y0 = y0_list[y0_idx]
-
-#         # Your computation logic (example of how you can offload)
-#         # Initialize variables (example)
-#         x0 = 0
-#         # Call dx_dt and dy_dt directly (they are now device functions)
-#         dx = dx_dt(t0, x0, y0, a, F, f, mu, phi, tau)
-#         dy = dy_dt(t0, x0, y0, b, F, f, mu, phi, tau)
-
-#         _, x_values, y_values, _ = nm.runge_kutta_slide(dx, dy, f, F, mu, phi, a, b, tau, 
-#                                                         t0, x0, y0, h, t_end, t0_shift=True, period=2*tau)
-
-#         # Find the intercept
-#         y_index = np.argmax(x_values == 0)
-#         if y_values[-y_index - 1] >= 0:
-#             y_intercept = y_values[-y_index - 1]
-#         else:
-#             y_index_new = np.argmax(x_values[y_index + 1:] == 0)
-#             y_intercept = y_values[-y_index_new - 1]
-        
-#         # Store the result in the output array
-#         results[idx] = y_intercept
-
-# def run_cuda_computation(t0, y0_list, mu_list, a, b, tau, dx_dt, dy_dt, f, F, phi, h, t_end):
-#     num_results = len(mu_list) * len(y0_list)
-#     results = np.zeros(num_results, dtype=np.float32)
-
-#     # Transfer data to device (GPU)
-#     d_mu_list = cuda.to_device(mu_list)
-#     d_y0_list = cuda.to_device(y0_list)
-#     d_results = cuda.to_device(results)
-
-#     # Launch kernel (set block and grid size)
-#     threads_per_block = 256
-#     blocks_per_grid = (num_results + threads_per_block - 1) // threads_per_block
-#     compute_y_intercept_kernel[blocks_per_grid, threads_per_block](t0, d_mu_list, d_y0_list, d_results, a, b, tau, f, F, phi, h, t_end)
-
-#     # Copy results back to CPU
-#     results = d_results.copy_to_host()
-
-#     return results
-
-
-# def create_diagram_point1(t0_list, y0_list, mu_list, dx_dt, dy_dt, f, F, a, b, tau, phi, h, t_end):
-#     num_plots = len(t0_list)
-#     ncols = 2 if num_plots > 1 else 1
-#     nrows = (num_plots + 1) // 2  # Ensure enough rows
-
-#     fig, ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(10, 6))
-#     if num_plots == 1:
-#         ax = np.array([ax])  # Ensure it's iterable
-#     else:
-#         ax = np.ravel(ax)
-
-#     for i in range(len(t0_list)):
-#         # Use CUDA-enabled function to compute results
-#         results = run_cuda_computation(t0_list[i], y0_list, mu_list, a, b, tau, dx_dt, dy_dt, f, F, phi, h, t_end)
-
-#         mu_array = np.repeat(mu_list, len(y0_list))  # Expand mu values
-#         y_points = np.array(results)
-
-#         sc = ax[i].scatter(mu_array, y_points, c=np.tile(y0_list, len(mu_list)), cmap='viridis', alpha=0.5)
-#         fig.colorbar(sc, ax=ax[i], label=r'$y_0$ values')  # Attach colorbar to the subplot
-#         ax[i].plot(mu_list, np.zeros(len(mu_list)), 'k--')
-#         ax[i].set_title(f"t0 = {t0_list[i]}")
-#         ax[i].grid()
-
-#     plt.tight_layout()
-#     plt.show()
-
-
-
-# def create_diagram_cycle(t0, y0_list, mu_list, a, b, tau, F, f, phi, h, t_end):
-#     x0 = 0
-
-#     y_points = np.array([])
-#     for mu in mu_list:
-#         f_diag = lambda t: f(t, phi=phi, mu=mu, tau=tau)
-#         F_diag = F
-#         dx_dt_diag = lambda t, x, y: fn.dx_dt(t, x, y, a, F_diag, f=f_diag)
-#         dy_dt_diag = lambda t, x, y: fn.dy_dt(t, x, y, b, F_diag, f=f_diag)
-#         for i in range(len(y0_list)):
-#             t_values, x_values, y_values, _ = nm.runge_kutta_slide(dx_dt_diag, dy_dt_diag, t0, x0, y0_list[i], h, t_end)
-#             np.flip(x_values)
-#             y_index = np.argmax(x_values == 0)
-#             np.append(y_points, y_values[-y_index-1])
-
-#     fig, ax = plt.subplots()
-#     ax.scatter(mu_list, y0_list, c=lambda x, y: y - )
-#     plt.grid()
+    return eigenval, eigenvec

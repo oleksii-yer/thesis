@@ -1,11 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from functions import dx_dt, dy_dt
 from matplotlib.animation import FuncAnimation
 import functions as fn
+import analytical as an
 
 
-def plot_basic(t_values, x_values, y_values):
+def plot_basic(x_values, y_values):
     fig, ax = plt.subplots()
     ax.set_xlabel('x')
     ax.set_ylabel('y')
@@ -21,8 +21,8 @@ def plot_basic(t_values, x_values, y_values):
     plt.show()
 
 
-def plot_anim(t_values, x_values, y_values, slide, title, frame_step, include_y_intecept=False, include_slide=False, vec_field=False, 
-              normed=True, a=None, b=None, f=None, F=None):
+def plot_anim(t_values, x_values, y_values, title, frame_step, xlim = None, ylim = None, include_y_intecept=False, include_slide=False, vec_field=False, 
+              normed=True, a=None, b=None, mu=None, tau=None, f_type=None, F_type=None):
     # Set up the figure and axis
     fig, ax = plt.subplots()
     ax.set_xlabel('x')
@@ -40,15 +40,29 @@ def plot_anim(t_values, x_values, y_values, slide, title, frame_step, include_y_
     # Initialize the line object
     line, = ax.plot([], [], 'b', lw=1)
     slide_zone, = ax.plot([], [], 'r')
-    y_intercept, = ax.plot([], [], 'ro', markersize=6)
+    y_intercept, = ax.plot([], [], 'go', markersize=4, alpha=0.5)
     if vec_field:
+        if f_type == 'meand':
+            f = fn.f_meand
+        elif f_type == 'sin':
+            f = fn.sin
+        if F_type == 'closed':
+            F = fn.F_closed
+        elif F_type == 'open':
+            F = fn.F_open
         dx_dt = lambda t, x, y: fn.dx_dt(t, x, y, a, F, f)
         dy_dt = lambda t, x, y: fn.dy_dt(t, x, y, b, F, f)
         quiver = ax.quiver(X, Y, np.zeros_like(X), np.zeros_like(Y), scale=25, width=0.004, color='purple')
 
     # Set limits based on data
-    ax.set_xlim(min(x_values), max(x_values))
-    ax.set_ylim(min(y_values), max(y_values))
+    x_left = np.min(x_values) if xlim == None else xlim[0]
+    x_right = np.max(x_values) if xlim == None else xlim[1]
+    y_left = np.min(y_values) if ylim == None else ylim[0]
+    y_right = np.max(y_values) if ylim == None else ylim[1]
+
+    ax.set_xlim(x_left, x_right)
+    ax.set_ylim(y_left, y_right)
+
 
     # Initialization function for the animation
     def init():
@@ -65,6 +79,7 @@ def plot_anim(t_values, x_values, y_values, slide, title, frame_step, include_y_
         line.set_data(x_values[:frame], y_values[:frame])
 
         nonlocal intercept_frame
+        nonlocal frame_step
 
         if vec_field:
             dx_dt_v = np.vectorize(dx_dt)
@@ -81,24 +96,23 @@ def plot_anim(t_values, x_values, y_values, slide, title, frame_step, include_y_
         res_list = [line]
 
         if include_slide:
-            if slide[frame] != 0:
-                slide_zone.set_data([0,0], slide[frame])
-            else:
-                slide_zone.set_data([],[])
+            slide_zone.set_data([0,0], [an.compute_slide_botedge(t_values[frame], a, mu, tau, f_type),
+                                        an.compute_slide_topedge(t_values[frame], a, mu, tau, f_type)])
             res_list.append(slide_zone)
 
         if vec_field:
             res_list.append(quiver)
 
         if include_y_intecept:
-            if frame == 0:
-                if x_values[frame] == 0:
-                    y_intercept.set_data([0], [y_values[frame]])
-                else:
-                    y_intercept.set_data([], [])
+            if (frame == 0) and (x_values[frame] == 0):
+                intercept_frame = 0
+                y_intercept.set_data([0], [y_values[intercept_frame]])
             else:
-                if (x_values[frame]*x_values[frame-frame_step] < 0):
-                    intercept_frame = np.argmax(x_values[frame-frame_step:frame] == 0) + (frame-frame_step)
+                if (len(x_values) - (frame+frame_step)) < 0:
+                    frame_step = len(x_values) - frame
+                    frame = frame + (frame_step) - 1
+                if (x_values[np.max([frame-frame_step, 0])]*x_values[frame] <= 0):
+                    intercept_frame = np.argmax(x_values[np.max([frame-frame_step, 0]):frame+1] == 0) + np.max([frame-frame_step, 0])
                 if intercept_frame is not None:
                     y_intercept.set_data([0], [y_values[intercept_frame]])
                 else:
